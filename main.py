@@ -9,10 +9,14 @@ release day, the log ratio
     r = ln(viewers in hour h / viewers in hour 1),
 
 pools those ratios across launches, and reads the five scored quantiles
-straight off the pooled empirical distribution of each hour. Each hour's
-deviations from its own median are widened by a fixed factor (SPREAD_BOOST)
-that a leave-one-out backtest over the kit's historical launches selected.
-The case's hour-1 print then rescales the shape back into viewers.
+off the pooled empirical distribution of each hour — except that each
+hour's deviations from its own median are first shrunk toward the pooled
+deviation profile of all hours together (weight n / (n + SHRINK_K) on the
+hour's own shape, since a few dozen launches estimate an hour's extreme
+quantiles only noisily), and then widened by a fixed factor (SPREAD_BOOST).
+Both constants were selected by a leave-one-out backtest over the kit's
+historical launches. The case's hour-1 print then rescales the shape back
+into viewers.
 
 Why empirical quantiles rather than a fitted normal: the cross-launch ratio
 distribution is skewed (a launch whose first hour was quiet can multiply
@@ -46,6 +50,14 @@ SPREAD_BOOST = 1.05
 
 # Below this many ratio samples an hour is not trusted on its own.
 MIN_SAMPLES = 5
+
+# Shrinkage strength for blending an hour's own deviations from its median
+# with the pooled deviation profile of every hour together: the hour keeps
+# weight n / (n + SHRINK_K) of its own shape, where n is its sample count.
+# A leave-one-out backtest over the kit's historical launches selected 8
+# (loss 0.7116, against 0.7135 with no shrinkage); the curve is a shallow
+# U, with every value from 2 to 16 also beating no shrinkage.
+SHRINK_K = 8
 
 # Standard-normal quantiles, used only by the no-comparables fallback.
 NORMAL_Z = {0.05: -1.645, 0.25: -0.674, 0.5: 0.0, 0.75: 0.674, 0.95: 1.645}
@@ -126,8 +138,22 @@ def hour_log_quantiles(hour, levels, per_hour, pooled):
     samples = per_hour.get(hour) or []
     if len(samples) >= MIN_SAMPLES:
         median = empirical_quantile(samples, 0.5)
+        # This hour's own deviations are a noisy estimate of its shape: a
+        # few dozen launches pin down the extreme quantiles only loosely.
+        # Blend them with the pooled deviation profile (every hour's ratios
+        # together, far more samples) at weight n / (n + SHRINK_K) on the
+        # hour's own shape, so sparse evidence leans on the average launch
+        # shape and rich evidence mostly speaks for itself. This is the
+        # same pooled shape the sparse-hour branch below already borrows.
+        pooled_median = empirical_quantile(pooled, 0.5)
+        own_weight = len(samples) / (len(samples) + SHRINK_K)
         return [
-            median + SPREAD_BOOST * (empirical_quantile(samples, tau) - median)
+            median
+            + SPREAD_BOOST
+            * (
+                own_weight * (empirical_quantile(samples, tau) - median)
+                + (1 - own_weight) * (empirical_quantile(pooled, tau) - pooled_median)
+            )
             for tau in levels
         ]
     if pooled:
